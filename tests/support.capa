@@ -1,0 +1,28 @@
+// tests/support.capa
+//
+// Byte-list builders and a byte renderer shared by the suite. The
+// oracle corpus is given as raw byte ranges (0x00..0xFF) rather than
+// text, so the tests construct them directly, and decoded bytes are
+// compared by rendering them to a stable "b0,b1,b2" String.
+
+/// The ascending byte sequence start, start+1, ..., end (inclusive).
+pub fun byte_range(start: Int, end: Int) -> List<Int>
+    let out: List<Int> = []
+    var v = start
+    while v <= end
+        out.push(v)
+        v = v + 1
+    return out
+
+/// Render a byte list as "b0,b1,b2" (empty list -> ""), so exact byte
+/// contents can be compared with the String assertions.
+pub fun join_ints(xs: List<Int>) -> String
+    var out = ""
+    var first = true
+    for x in xs
+        if first
+            out = "${x}"
+            first = false
+        else
+            out = "${out},${x}"
+    return out

@@ -1,0 +1,34 @@
+// example.capa
+//
+// Encode a String to hexadecimal and decode it back. The library
+// itself is pure (no capabilities at all); the only capability here is
+// the example's own Stdio, used to print. The hex functions never
+// touch it.
+//
+// Run from the repository root:
+//
+//     capa --run example.capa
+//     capa --wasm --run example.capa   # byte-identical output
+
+import capa_hex.hex
+
+fun main(stdio: Stdio)
+    let message = "The quick brown fox jumps over the lazy dog"
+    stdio.println("message: ${message}")
+
+    // Lowercase hex (two chars per UTF-8 byte).
+    let encoded = encode_utf8(message)
+    stdio.println("hex:     ${encoded}")
+
+    // Uppercase hex over the same bytes.
+    stdio.println("upper:   ${encode_upper(message.bytes())}")
+
+    // Decode returns a Result: a malformed input would be an Err, never
+    // a panic. Here the input is well-formed, so the bytes come back.
+    match decode(encoded)
+        Ok(bytes) ->
+            let same = bytes == message.bytes()
+            stdio.println("decoded: ${bytes.length()} byte(s)")
+            stdio.println("roundtrip: ${same}")
+        Err(e) ->
+            stdio.println("decode failed: ${hex_error_message(e)}")

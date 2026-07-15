@@ -1,0 +1,141 @@
+// tests/test_hex.capa
+//
+// Hexadecimal (base16) against known vectors whose expected values come
+// from Python's `binascii.hexlify` / `bytes.fromhex` (the oracle): the
+// empty input, single bytes, "foobar", 0x00 and 0xFF, all 256 byte
+// values (byte-exact and round-trip), a UTF-8 String, uppercase-input
+// decodes equal to lowercase, and rejection of odd-length and non-hex
+// input. Every encode is cross-checked against the oracle string; every
+// decode round-trips back to the input; and the decoder is shown to
+// reject malformed input with a typed HexError rather than a panic or
+// wrong bytes.
+
+import capa_test.testing
+import capa_hex.hex
+import support
+
+// Assert a decode succeeds and yields exactly `want` (rendered bytes).
+fun expect_bytes(t: Tester, stdio: Stdio, name: String, got: Result<List<Int>, HexError>, want: String)
+    match got
+        Ok(bytes) -> t.eq_str(stdio, name, join_ints(bytes), want)
+        Err(e)    -> t.fail(stdio, name, "unexpected error: ${hex_error_message(e)}")
+
+// Assert a decode is rejected (any HexError), never a wrong result.
+fun expect_reject(t: Tester, stdio: Stdio, name: String, got: Result<List<Int>, HexError>)
+    match got
+        Ok(bytes) -> t.fail(stdio, name, "expected rejection, got ${bytes.length()} byte(s)")
+        Err(_)    -> t.check(stdio, name, true)
+
+// Assert decode(encode(data)) == data.
+fun roundtrip(t: Tester, stdio: Stdio, name: String, data: List<Int>)
+    match decode(encode(data))
+        Ok(bytes) -> t.eq_bool(stdio, name, bytes == data, true)
+        Err(e)    -> t.fail(stdio, name, "unexpected error: ${hex_error_message(e)}")
+
+fun main(stdio: Stdio)
+    let t = tester()
+
+    // --- Known encode vectors (over UTF-8 bytes) ---
+
+    t.eq_str(stdio, "enc_empty",  encode_utf8(""),       "")
+    t.eq_str(stdio, "enc_f",      encode_utf8("f"),      "66")
+    t.eq_str(stdio, "enc_fo",     encode_utf8("fo"),     "666f")
+    t.eq_str(stdio, "enc_foobar", encode_utf8("foobar"), "666f6f626172")
+
+    // Single-byte edges 0x00 and 0xFF.
+    t.eq_str(stdio, "enc_00", encode([0x00]), "00")
+    t.eq_str(stdio, "enc_ff", encode([0xFF]), "ff")
+    t.eq_str(stdio, "enc_00ff", encode([0x00, 0xFF]), "00ff")
+
+    // Uppercase encoder over the same bytes.
+    t.eq_str(stdio, "enc_upper_00ff", encode_upper([0x00, 0xFF]), "00FF")
+    t.eq_str(stdio, "enc_upper_foobar", encode_upper("foobar".bytes()), "666F6F626172")
+
+    // --- Known decode vectors (exact bytes back) ---
+
+    expect_bytes(t, stdio, "dec_empty",  decode(""),             "")
+    expect_bytes(t, stdio, "dec_f",      decode("66"),           "102")
+    expect_bytes(t, stdio, "dec_foobar", decode("666f6f626172"), "102,111,111,98,97,114")
+    expect_bytes(t, stdio, "dec_00ff",   decode("00ff"),         "0,255")
+
+    // Uppercase input decodes equal to lowercase.
+    expect_bytes(t, stdio, "dec_upper_00ff", decode("00FF"), "0,255")
+    expect_bytes(t, stdio, "dec_upper_foobar", decode("666F6F626172"), "102,111,111,98,97,114")
+    // A mix of cases is accepted too.
+    expect_bytes(t, stdio, "dec_mixedcase", decode("00Ff"), "0,255")
+
+    // --- Oracle (Python binascii.hexlify): all 256 byte values ---
+
+    let all = byte_range(0, 255)
+    t.eq_str(stdio, "oracle_all_lower", encode(all),
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+    t.eq_str(stdio, "oracle_all_upper", encode_upper(all),
+        "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F404142434445464748494A4B4C4D4E4F505152535455565758595A5B5C5D5E5F606162636465666768696A6B6C6D6E6F707172737475767778797A7B7C7D7E7F808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9FA0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3B4B5B6B7B8B9BABBBCBDBEBFC0C1C2C3C4C5C6C7C8C9CACBCCCDCECFD0D1D2D3D4D5D6D7D8D9DADBDCDDDEDFE0E1E2E3E4E5E6E7E8E9EAEBECEDEEEFF0F1F2F3F4F5F6F7F8F9FAFBFCFDFEFF")
+
+    // Uppercase-input decode of the all-256 corpus equals lowercase.
+    match decode(encode_upper(all))
+        Ok(bytes) -> t.eq_bool(stdio, "dec_upper_all", bytes == all, true)
+        Err(e)    -> t.fail(stdio, "dec_upper_all", "unexpected error: ${hex_error_message(e)}")
+
+    // --- Binary vector and a longer fixed vector (oracle-derived) ---
+
+    let vbin: List<Int> = [0xFB, 0xFF, 0xBF, 0x00, 0xFF, 0x10]
+    t.eq_str(stdio, "bin_lower", encode(vbin),       "fbffbf00ff10")
+    t.eq_str(stdio, "bin_upper", encode_upper(vbin), "FBFFBF00FF10")
+
+    let r17: List<Int> = [0xB3, 0x3C, 0x09, 0x7C, 0x20, 0x0E, 0x6E, 0xE9, 0xE0, 0xAE, 0xFB, 0x31, 0x2D, 0x54, 0xEB, 0xC9, 0x10]
+    t.eq_str(stdio, "r17_lower", encode(r17), "b33c097c200e6ee9e0aefb312d54ebc910")
+
+    // --- UTF-8 String convenience against the oracle ---
+
+    let utf = "héllo wörld café 日本語 🎉"
+    t.eq_str(stdio, "utf8_lower", encode_utf8(utf),
+        "68c3a96c6c6f2077c3b6726c6420636166c3a920e697a5e69cace8aa9e20f09f8e89")
+
+    // --- Round-trips: decode(encode(x)) == x ---
+
+    roundtrip(t, stdio, "rt_empty", [])
+    roundtrip(t, stdio, "rt_all",   all)
+    roundtrip(t, stdio, "rt_bin",   vbin)
+    roundtrip(t, stdio, "rt_r17",   r17)
+    roundtrip(t, stdio, "rt_00",    [0x00])
+    roundtrip(t, stdio, "rt_ff",    [0xFF])
+
+    // Every single byte value round-trips on its own.
+    var b = 0
+    var single_ok = true
+    while b < 256
+        match decode(encode([b]))
+            Ok(bytes) ->
+                if bytes != [b]
+                    single_ok = false
+            Err(_) -> single_ok = false
+        b = b + 1
+    t.eq_bool(stdio, "rt_each_single_byte", single_ok, true)
+
+    // --- Decode rejection: malformed input is Err, never a panic ---
+
+    // Odd length.
+    expect_reject(t, stdio, "reject_odd_1", decode("f"))
+    expect_reject(t, stdio, "reject_odd_3", decode("666"))
+    // Non-hex character 'g'.
+    expect_reject(t, stdio, "reject_g", decode("6g"))
+    // A space.
+    expect_reject(t, stdio, "reject_space", decode("66 6"))
+    expect_reject(t, stdio, "reject_space2", decode("66 6f"))
+    // A unicode (multi-byte) character.
+    expect_reject(t, stdio, "reject_unicode", decode("66é6"))
+
+    // --- The Err carries the expected typed variant ---
+
+    match decode("f")
+        Ok(_)             -> t.fail(stdio, "err_odd_variant", "expected OddLength")
+        Err(OddLength(n)) -> t.eq_int(stdio, "err_odd_variant", n, 1)
+        Err(_)            -> t.fail(stdio, "err_odd_variant", "wrong variant")
+
+    match decode("6g")
+        Ok(_)                    -> t.fail(stdio, "err_char_variant", "expected InvalidCharacter")
+        Err(InvalidCharacter(c)) -> t.eq_str(stdio, "err_char_variant", c, "g")
+        Err(_)                   -> t.fail(stdio, "err_char_variant", "wrong variant")
+
+    t.finish(stdio)

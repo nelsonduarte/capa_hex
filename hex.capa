@@ -1,0 +1,128 @@
+// capa_hex.hex
+//
+// Hexadecimal (base16) encoding, a pure function from bytes to text and
+// back. No capabilities, no Unsafe: encoding and decoding are total
+// data transforms, so nothing here can touch the filesystem, the
+// network, the clock, randomness, or anything else. `capa --manifest`
+// proves the empty surface. Output is byte-identical on the Python and
+// Wasm backends.
+//
+// Each byte becomes exactly two hex characters, high nibble first.
+// `encode` emits lowercase `0-9a-f`; `encode_upper` emits uppercase
+// `0-9A-F`.
+//
+// Decoding is STRICT: any character outside `0-9a-fA-F`, or an
+// odd-length input (which cannot name a whole number of bytes), is
+// rejected with a typed `HexError`. Both lowercase and uppercase input
+// are accepted. A decode never panics and never returns partial or
+// wrong bytes; a malformed input is an `Err`, always.
+//
+// BYTE CONTRACT: the encoders take bytes as `List<Int>`, each element
+// in 0..255. A value outside that range is SILENTLY masked to its low
+// 8 bits (`& 0xFF`: 256 -> 0, -1 -> 255), with no error, identically
+// on both backends. For text, prefer `encode_utf8` (or `String.bytes()`
+// then `encode`), which is always in range. The decoders return bytes
+// in 0..255.
+
+// The 16 output symbols, indexed 0..15 by their 4-bit value.
+const LOWER_DIGITS: String = "0123456789abcdef"
+const UPPER_DIGITS: String = "0123456789ABCDEF"
+
+/// The error type the decode function returns in the `Err` arm instead
+/// of panicking or guessing.
+pub type HexError =
+    InvalidCharacter(String)   // a char outside `0-9a-fA-F`
+    OddLength(Int)             // an input whose length is not even
+
+/// A human-readable message for a `HexError`.
+pub fun hex_error_message(e: HexError) -> String
+    return match e
+        InvalidCharacter(c) -> "invalid hex character '${c}'"
+        OddLength(n)        -> "odd hex length ${n}"
+
+// ---------------------------------------------------------------
+// Small String helpers. Hex text is ASCII, so a `char_at` read yields
+// exactly one hex character; a multi-byte code point in the input
+// simply matches no digit and is rejected.
+
+/// The character at index `i`, or "" past the end.
+fun char_str(text: String, i: Int) -> String
+    return match text.char_at(i)
+        Some(ch) -> ch
+        None     -> ""
+
+/// The output symbol for a 4-bit value in 0..15.
+fun symbol(digits: String, value: Int) -> String
+    return match digits.char_at(value)
+        Some(ch) -> ch
+        None     -> "?"
+
+/// The 4-bit value of a hex character, accepting both cases, or -1 if
+/// it is not a hex digit.
+fun digit_value(c: String) -> Int
+    var j = 0
+    while j < 16
+        if char_str(LOWER_DIGITS, j) == c
+            return j
+        if char_str(UPPER_DIGITS, j) == c
+            return j
+        j = j + 1
+    return -1
+
+// ---------------------------------------------------------------
+// Encoding.
+
+/// Encode `data` under `digits`, two symbols per byte, high nibble
+/// first.
+fun encode_with(data: List<Int>, digits: String) -> String
+    var out = ""
+    for b in data
+        let byte = b & 0xFF
+        out = "${out}${symbol(digits, byte >> 4)}"
+        out = "${out}${symbol(digits, byte & 0x0F)}"
+    return out
+
+// ---------------------------------------------------------------
+// Public surface.
+
+/// Encode bytes as lowercase hexadecimal (`0-9a-f`), two characters per
+/// byte. Pure, zero capabilities. Bytes outside 0..255 are masked to 8
+/// bits (see the BYTE CONTRACT).
+pub fun encode(data: List<Int>) -> String
+    return encode_with(data, LOWER_DIGITS)
+
+/// Encode bytes as uppercase hexadecimal (`0-9A-F`), two characters per
+/// byte. Pure, zero capabilities. Bytes outside 0..255 are masked to 8
+/// bits (see the BYTE CONTRACT).
+pub fun encode_upper(data: List<Int>) -> String
+    return encode_with(data, UPPER_DIGITS)
+
+/// Decode a hexadecimal String back to bytes. STRICT: rejects any
+/// character outside `0-9a-fA-F` with `InvalidCharacter`, and rejects
+/// an odd-length input with `OddLength`. ACCEPTS both lowercase and
+/// uppercase input (and a mix of the two). Returns `Err(HexError)` on
+/// malformed input, never a panic and never partial or wrong bytes.
+/// Pure, zero capabilities.
+pub fun decode(text: String) -> Result<List<Int>, HexError>
+    let n = text.length()
+    if n % 2 != 0
+        return Err(OddLength(n))
+    let out: List<Int> = []
+    var i = 0
+    while i < n
+        let hi_ch = char_str(text, i)
+        let lo_ch = char_str(text, i + 1)
+        let hi = digit_value(hi_ch)
+        if hi < 0
+            return Err(InvalidCharacter(hi_ch))
+        let lo = digit_value(lo_ch)
+        if lo < 0
+            return Err(InvalidCharacter(lo_ch))
+        out.push((hi << 4) | lo)
+        i = i + 2
+    return Ok(out)
+
+/// Encode a String's UTF-8 bytes as lowercase hexadecimal. Convenience
+/// over `encode(text.bytes())`. Pure, zero capabilities.
+pub fun encode_utf8(text: String) -> String
+    return encode(text.bytes())
