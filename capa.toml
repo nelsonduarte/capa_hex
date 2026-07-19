@@ -13,8 +13,68 @@
 
 [package]
 name = "capa_hex"
-version = "0.1.0"
-capa = ">=1.1.0"
+version = "0.2.0"
+# THE COMPILER FLOOR IS LOAD-BEARING, and not only as documentation.
+# tools/capa_floor.sh in the release guards reads this key to decide
+# which RELEASED compiler the clean room downloads, so it is the
+# version the published tarball is actually proven to build with.
+#
+# It said ">=1.1.0", and that was not merely untested, it was FALSE.
+# Both halves were checked by running the flow against the released
+# binaries rather than by reasoning about them:
+#
+#   1.1.0   cannot compile example.capa or the suite AT ALL. They say
+#           `import capa_hex.hex`, and in the extracted tarball the
+#           project root is named `capa_hex-v0.2.0`, so that release
+#           resolves the package's self-import to nothing and errors.
+#           The manifest named a compiler that could not build the
+#           thing the manifest describes.
+#   1.18.0  compiles everything and then fails `capa test`: under
+#           PyInstaller `sys.executable` is the capa binary itself,
+#           which rejects `-m`, so the test runner was unusable for
+#           everyone not running from a source checkout.
+#   1.18.1  the whole flow passes.
+#
+# The floor is therefore EXACTLY tight: 1.18.0 fails, 1.18.1 passes.
+#
+# Narrowing the supported toolchain is why this is a MINOR bump and
+# not a patch: a consumer pinned to an older compiler could obey the
+# v0.1.0 manifest and cannot obey this one. Nothing in the library's
+# API changed.
+capa = ">=1.18.1"
+
+# THE CEILING, and why a pure library declares one at all.
+#
+# Without a [capabilities] table `capa --check-capabilities` prints
+# "no package declares a ceiling; nothing to verify" and exits 0. That
+# is a green check that inspected nothing, which is the same shape as
+# the defects the release guards exist to catch, so the choice here is
+# between declaring a ceiling and not running the command.
+#
+# It is worth declaring, and that was measured rather than assumed. A
+# `pub fun encode_file(fs: Fs, path: String)` added to hex.capa is a
+# pure codec silently acquiring the authority to read the filesystem;
+# it COMPILES CLEANLY, so `capa --check` passes it and the release
+# would ship it. With this table it is refused by name:
+#
+#   package 'capa_hex' declares max=['Stdio'] but its own code
+#   introduces 'Fs'
+#
+# WHY "Stdio" AND NOT THE EMPTY LIST, stated because the empty list is
+# what the README's audit claim asserts. The ceiling is a property of
+# the PACKAGE, evaluated over everything reachable from whichever
+# entry point is checked, and example.capa legitimately holds Stdio to
+# print. `max = []` therefore passes hex.capa and FAILS example.capa,
+# which would ship a tarball in which a documented command errors.
+#
+# What this bound does and does not buy, exactly: it catches the
+# library acquiring any of Fs, Net, Env, Db, Proc, Random, Clock,
+# Serve or Unsafe. It does NOT catch hex.capa acquiring Stdio, because
+# the example already introduces it. `capa --manifest hex.capa`, which
+# the README's audit claim uses, remains the tighter statement: it
+# reports the empty set per function.
+[capabilities]
+max = ["Stdio"]
 
 [dev-dependencies.capa_test]
 git = "https://github.com/nelsonduarte/capa_test"

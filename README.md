@@ -16,7 +16,14 @@ and rejection cases.
 
 ## Status
 
-v0.1 (seed library). Scope, fixed by design:
+v0.2 (seed library). **Requires capa >= 1.18.1.** The library's API is
+unchanged since v0.1; the floor moved because v0.1.0's declared
+`>=1.1.0` turned out to be false. capa 1.1.0 cannot compile
+`example.capa` or the suite at all: they self-import `capa_hex.hex`,
+and in a released tarball the project root is named `capa_hex-<tag>`,
+which that compiler cannot resolve. See
+[`SECURITY.md`](./SECURITY.md#the-release-guards) for how that was
+found. Scope, fixed by design:
 
 - **Lowercase hex** (`0-9a-f`), two characters per byte, high nibble
   first. `encode`.
@@ -71,7 +78,7 @@ capa --wasm --run example.capa   # byte-identical output
 ```toml
 [dependencies.capa_hex]
 git = "https://github.com/nelsonduarte/capa_hex"
-tag = "v0.1.0"
+tag = "v0.2.0"
 verify_key = "6C1D222D491FB88031E041A536CFB426101AA24B"
 ```
 
@@ -213,6 +220,54 @@ additionally lists every capability (`Clock`, `Db`, `Env`, `Fs`,
 this repository are in the example and are the example's own (`Stdio`
 to print). A program using `capa_hex` declares only the authority its
 own code needs.
+
+Since v0.2 that claim is also **enforced at release time**, not merely
+reported. `capa.toml` declares
+
+```toml
+[capabilities]
+max = ["Stdio"]
+```
+
+and the release runs `capa --check-capabilities` over both entry
+points in a clean room. Adding, say, a `pub fun encode_file(fs: Fs,
+path: String)` to `hex.capa` type-checks and compiles perfectly
+happily, so `capa --check` would pass it and the release would ship a
+codec that reads your filesystem. The ceiling is the step that refuses
+it, by name:
+
+```
+capa: --check-capabilities: FAILED - 1 ceiling violation(s):
+  - package 'capa_hex' declares max=['Stdio'] but its own code introduces 'Fs'
+```
+
+The bound is `["Stdio"]` rather than `[]` because the ceiling covers
+the whole package and `example.capa` legitimately prints. So it
+catches the library acquiring any of `Fs`, `Net`, `Env`, `Db`, `Proc`,
+`Random`, `Clock`, `Serve` or `Unsafe`, and does **not** catch
+`hex.capa` acquiring `Stdio`; `capa --manifest hex.capa` above remains
+the tighter statement.
+
+## Verifying a downloaded release
+
+These are the commands the release's own clean-room guard runs against
+the published tarball, with a released compiler, in a directory with no
+siblings. They are the commands to run after extracting it:
+
+```bash
+gpg --import publisher.asc     # the dev-dependency's tag is signature-checked
+capa install
+capa --check hex.capa
+capa --check example.capa
+capa --check-capabilities hex.capa
+capa --check-capabilities example.capa
+capa test
+```
+
+If any of them fails on a released tarball, that is a bug in the
+release and worth reporting. See
+[`SECURITY.md`](./SECURITY.md#build-provenance-and-what-gates-a-release)
+for the signature and attestation checks that come first.
 
 ## Honest posture
 

@@ -1,0 +1,409 @@
+#!/usr/bin/env bash
+#
+# Regression test for how .github/workflows/release.yml CALLS the shared
+# release guards.
+#
+# WHY THIS EXISTS. The guards themselves are tested where they live, in
+# the compiler repository. What is NOT tested there, and cannot be, is
+# whether a consumer wired them up in a way that actually gates
+# anything. A `guards:` job that runs and reports failure while the
+# release publishes anyway is worse than no guard at all: it produces a
+# green-looking gate, a red job nobody reads, and a published artefact.
+# That is the same shape as the defects the guards exist to catch,
+# verification that proves nothing about the thing it appears to cover.
+#
+# The wiring can break in ways that no YAML parser and no linter calls
+# an error, because every one of them is a VALID workflow:
+#
+#   * pinning a tag or a branch instead of a commit, so the guard can be
+#     edited under us;
+#   * pinning a well-formed SHA that does not exist, so every release
+#     fails at dispatch, or worse, resolves to something unintended;
+#   * dropping `needs: guards`, so the two jobs race and the release can
+#     publish before the guards finish;
+#   * `continue-on-error` or a job-level `if: always()`, so the guards
+#     run, fail, and block nothing.
+#
+# Run it directly:
+#
+#   bash tests/test_release_wiring.sh
+#
+# `capa test` runs the .capa files in tests/ and ignores this one.
+#
+# Deliberately grep and awk based: it needs nothing installed and runs
+# anywhere the release runs. The one check that needs the network (does
+# the pinned commit exist, and does it carry the workflow file) reports
+# SKIP rather than failing when `gh` is unavailable or unauthenticated,
+# because an offline machine cannot answer that question and a test that
+# guesses is the failure mode this whole file is about.
+#
+# ------------------------------------------------------------------
+# THIS FILE IS MEANT TO BE SHARED ACROSS REPOSITORIES.
+#
+# It was derived from capa_authgate's copy, which hardcoded that
+# repository's own shape: `main.capa`, `service.capa` and
+# `tools/nest_vendor.py`. Copied verbatim into any other package those
+# three assertions are false, and the nest_vendor one is false in EVERY
+# other repository in the fleet, because no other package has a
+# two-level dependency graph. A shared test whose assertions have to be
+# edited per repository is a shared test that will be edited wrongly.
+#
+# So everything repo-specific has been lifted into the CONFIG block
+# below and everything under it is intended to be byte-identical
+# everywhere. Adopting this file in a new package means editing the
+# config block and nothing else. If you find yourself editing below the
+# line, that is a signal the config block is missing a dimension, and
+# the fix is to add one rather than to fork the body.
+# ------------------------------------------------------------------
+
+set -uo pipefail
+
+# ================== CONFIG: the only repo-specific part ==================
+
+# Entry points the clean room must COMPILE, in the order the flow runs
+# them. For a library this is the library module plus any documented
+# runnable example; for an application it is each executable entry.
+ENTRY_POINTS=(hex.capa example.capa)
+
+# Entry points whose CAPABILITY CEILING the clean room must check.
+#
+# Leave this EMPTY for a package that declares no `[capabilities]` table
+# in capa.toml, and the body below will then require that the flow does
+# NOT run `--check-capabilities` at all. That is not pedantry: with no
+# ceiling declared the command prints
+#
+#   capa: --check-capabilities: no package declares a [capabilities]
+#         ceiling; nothing to verify.
+#
+# and exits 0. A step that always passes having inspected nothing is
+# precisely the class of defect the release guards exist to abolish, and
+# it is worse than omitting the step, because the log looks like
+# evidence. The body cross-checks this list against capa.toml so the two
+# cannot disagree.
+CEILING_ENTRIES=(hex.capa example.capa)
+
+# Does the consumer flow need `python tools/nest_vendor.py`?
+#
+# Only for a package with a TWO-LEVEL dependency graph: the ceiling gate
+# looks for a dependency's own dependencies under `vendor/<dep>/vendor/`
+# while `capa install` vendors flat. At the time of writing exactly one
+# repository in the fleet needs it (capa_authgate). Set to "yes" there
+# and "no" everywhere else; when it is "no" the body REQUIRES the line
+# to be absent, so a copy-paste of someone else's flow is caught rather
+# than silently carried along.
+NEEDS_NEST_VENDOR=no
+
+# ======================= END CONFIG; shared body =========================
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
+MANIFEST="${REPO_ROOT}/capa.toml"
+
+GUARD_REPO="nelsonduarte/capa-language"
+GUARD_PATH=".github/workflows/release-guards.yml"
+
+PASS=0
+FAIL=0
+SKIP=0
+
+ok()   { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
+no()   { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
+skip() { SKIP=$((SKIP + 1)); printf 'skip %s\n' "$1"; }
+
+check() {
+  local desc="$1" condition="$2"
+  if eval "${condition}"; then ok "${desc}"; else no "${desc}"; fi
+}
+
+if [ ! -f "${WORKFLOW}" ]; then
+  echo "FAIL: ${WORKFLOW} not found" >&2
+  exit 1
+fi
+
+# Extract one job's block: from `  <name>:` at two-space indent up to the
+# next line at that same indent level. Job-level keys sit at four spaces
+# and steps deeper, so this captures the whole job and nothing after it.
+job_block() {
+  awk -v job="$1" '
+    BEGIN { header = "^  " job ":[[:space:]]*$" }
+    $0 ~ header { in_job = 1; next }
+    in_job && /^  [A-Za-z_-]+:/ { in_job = 0 }
+    in_job { print }
+  ' "${WORKFLOW}"
+}
+
+GUARDS="$(job_block guards)"
+RELEASE="$(job_block release)"
+
+check "a guards job exists" '[ -n "${GUARDS}" ]'
+check "a release job exists" '[ -n "${RELEASE}" ]'
+
+# --- the guards are the shared ones, at a pinned commit ----------------
+
+USES="$(printf '%s\n' "${GUARDS}" | sed -n 's/^[[:space:]]*uses:[[:space:]]*//p')"
+
+check "the guards job calls a reusable workflow" '[ -n "${USES}" ]'
+
+check "it calls the shared guards, not a local copy" \
+  'printf "%s" "${USES}" | grep -qF "${GUARD_REPO}/${GUARD_PATH}@"'
+
+# The pin itself. A tag is mutable and a branch more so, so anything
+# that is not a full 40-hex commit SHA is refused. An abbreviated SHA is
+# refused too: abbreviations can become ambiguous as a repository grows.
+PIN="${USES##*@}"
+check "the guards are pinned by a full 40-character commit SHA (got '${PIN}')" \
+  'printf "%s" "${PIN}" | grep -qE "^[0-9a-f]{40}$"'
+
+# --- the guards actually gate the release ------------------------------
+
+check "the release job declares needs: guards" \
+  'printf "%s" "${RELEASE}" | grep -qE "^[[:space:]]*needs:[[:space:]]*(guards|\[[[:space:]]*guards[[:space:]]*\])[[:space:]]*$"'
+
+# `continue-on-error` on the guards job turns a failing gate into a
+# passing one, which is the single most dangerous edit possible here.
+check "the guards job does not set continue-on-error" \
+  '! printf "%s" "${GUARDS}" | grep -qE "^[[:space:]]*continue-on-error:"'
+
+check "the release job does not set continue-on-error" \
+  '! printf "%s" "${RELEASE}" | grep -qE "^[[:space:]]*continue-on-error:"'
+
+# A job-level `if:` on the release job can defeat `needs:` entirely:
+# `if: always()` and `if: !cancelled()` both run the job after the
+# guards have failed. Step-level `if:` keys sit deeper than four spaces
+# and are not matched here.
+check "the release job has no job-level if: that could bypass the guards" \
+  '! printf "%s" "${RELEASE}" | grep -qE "^    if:"'
+
+check "the guards job has no job-level if: that could skip it" \
+  '! printf "%s" "${GUARDS}" | grep -qE "^    if:"'
+
+# --- the guards are given enough to prove something --------------------
+
+# An empty consumer-commands makes the clean room report success having
+# run nothing. The shared guard refuses that itself; this asserts the
+# caller never gets there, and that the flow covers what this package
+# actually claims.
+COMMANDS="$(printf '%s\n' "${GUARDS}" | awk '
+  /^[[:space:]]*consumer-commands:[[:space:]]*\|/ { in_cmds = 1; next }
+  in_cmds && /^[[:space:]]{0,8}[a-zA-Z_-]+:/ { in_cmds = 0 }
+  in_cmds { print }
+' | grep -vE '^[[:space:]]*(#.*)?$')"
+
+check "the clean room is given consumer commands" '[ -n "${COMMANDS}" ]'
+
+check "the consumer flow imports the publisher key first" \
+  '[ "$(printf "%s\n" "${COMMANDS}" | head -1 | tr -d "[:space:]")" = "gpg--importpublisher.asc" ]'
+
+check "the consumer flow installs dependencies" \
+  'printf "%s" "${COMMANDS}" | grep -qF "capa install"'
+
+# The nested-vendor step, required or forbidden according to the config.
+# Both directions are asserted: a package that needs it and lost it has
+# an unrunnable ceiling check, and a package that does not need it but
+# carries the line inherited a command that will fail in its clean room
+# because it ships no tools/ directory.
+if [ "${NEEDS_NEST_VENDOR}" = "yes" ]; then
+  check "the consumer flow builds the nested vendor layout" \
+    'printf "%s" "${COMMANDS}" | grep -qF "tools/nest_vendor.py"'
+else
+  check "the consumer flow does NOT carry a nest_vendor step it has no tools/ for" \
+    '! printf "%s" "${COMMANDS}" | grep -qF "nest_vendor"'
+fi
+
+# Every configured entry point must be compiled.
+check "at least one entry point is configured" '[ "${#ENTRY_POINTS[@]}" -gt 0 ]'
+
+for entry in "${ENTRY_POINTS[@]}"; do
+  check "the consumer flow compiles ${entry}" \
+    "printf '%s' \"\${COMMANDS}\" | grep -qE '^[[:space:]]*capa --check ${entry}\$'"
+done
+
+# The ceiling, in whichever direction this package declares.
+#
+# The config and the manifest must agree. A CEILING_ENTRIES list with no
+# `[capabilities]` table means the flow runs a command that inspects
+# nothing and exits 0; a `[capabilities]` table with an empty list means
+# the package declares a bound that no release ever checks. Both are
+# verification theatre, in opposite directions, so both are refused.
+if [ -f "${MANIFEST}" ] && grep -qE '^[[:space:]]*\[capabilities\][[:space:]]*$' "${MANIFEST}"; then
+  DECLARES_CEILING=yes
+else
+  DECLARES_CEILING=no
+fi
+
+if [ "${#CEILING_ENTRIES[@]}" -gt 0 ]; then
+  check "capa.toml declares the [capabilities] ceiling this flow checks" \
+    '[ "${DECLARES_CEILING}" = "yes" ]'
+  for entry in "${CEILING_ENTRIES[@]}"; do
+    check "the consumer flow checks the capability ceiling of ${entry}" \
+      "printf '%s' \"\${COMMANDS}\" | grep -qF 'capa --check-capabilities ${entry}'"
+  done
+else
+  check "capa.toml declares no ceiling, matching an empty CEILING_ENTRIES" \
+    '[ "${DECLARES_CEILING}" = "no" ]'
+  # Without a ceiling the command prints "nothing to verify" and exits
+  # 0, so its presence would be a green step that inspected nothing.
+  check "the consumer flow does NOT run a --check-capabilities that would verify nothing" \
+    '! printf "%s" "${COMMANDS}" | grep -qF -- "--check-capabilities"'
+fi
+
+check "the consumer flow runs the tests" \
+  'printf "%s" "${COMMANDS}" | grep -qE "^[[:space:]]*capa test[[:space:]]*$"'
+
+# --- the guards hold no credential they could publish with -------------
+
+GUARD_PERMS="$(printf '%s\n' "${GUARDS}" | awk '
+  /^[[:space:]]*permissions:[[:space:]]*$/ { in_perms = 1; next }
+  in_perms && /^    [a-zA-Z_-]+:/ { in_perms = 0 }
+  in_perms { print }
+' | grep -vE '^[[:space:]]*(#.*)?$')"
+
+check "the guards job states its own permissions" '[ -n "${GUARD_PERMS}" ]'
+
+# The workflow-level grant is write-heavy (contents, id-token,
+# attestations) and a job that says nothing inherits all of it. The
+# guards read; `id-token: write` in particular is the token that SIGNS
+# attestations, and a guard must not be able to sign anything.
+check "the guards job grants itself no write permission" \
+  '! printf "%s" "${GUARD_PERMS}" | grep -qE ":[[:space:]]*write[[:space:]]*$"'
+
+check "the guards job does not take id-token" \
+  '! printf "%s" "${GUARD_PERMS}" | grep -qE "^[[:space:]]*id-token:"'
+
+# --- the caller closes the gap the guards cannot ------------------------
+
+# Guard 2 verifies a tarball it rebuilt from the tag, not the bytes this
+# workflow uploads, because it has to run before publication. Only the
+# release job holds the artefact it is about to publish, so only it can
+# assert the two are the same.
+check "the release job compares its tarball to the digest the guards verified" \
+  'printf "%s" "${RELEASE}" | grep -qF "needs.guards.outputs.tarball-sha256"'
+
+# --- what already existed here must not be weakened ---------------------
+#
+# Adopting the guards ADDS a gate; it must never cost one. These three
+# were in this repository's release workflow before the guards existed,
+# and a refactor that quietly drops any of them would still look like a
+# working release.
+
+check "the release job still verifies the tag's GPG signature" \
+  'printf "%s" "${RELEASE}" | grep -qF "git verify-tag"'
+
+check "the tag signature is still anchored to a pinned fingerprint" \
+  'grep -qE "^[[:space:]]*PINNED_FPR:" "${WORKFLOW}"'
+
+# Every third-party action must be pinned by full commit SHA. A `@v4`
+# tag is repointable by its owner, which in a workflow holding
+# `id-token: write` means someone else can sign as us.
+UNPINNED="$(grep -nE '^[[:space:]]*uses:[[:space:]]*[^ ]+@' "${WORKFLOW}" \
+  | grep -vE '@[0-9a-f]{40}([[:space:]]|$)' || true)"
+check "every action is pinned by full commit SHA${UNPINNED:+ (offenders: ${UNPINNED})}" \
+  '[ -z "${UNPINNED}" ]'
+
+# --- the rehearsal predicts the release ---------------------------------
+
+# guard-selftest.yml exists so the plumbing can be exercised on demand
+# instead of one data point per tag. It is only worth having if it
+# rehearses the SAME thing the release runs: a self-test pinned to a
+# different guard revision, or handed a different consumer flow, reports
+# success about a pipeline that is not the one which will publish.
+
+SELFTEST="${REPO_ROOT}/.github/workflows/guard-selftest.yml"
+
+if [ ! -f "${SELFTEST}" ]; then
+  no "a dispatchable guard self-test exists (guard-selftest.yml)"
+else
+  ok "a dispatchable guard self-test exists (guard-selftest.yml)"
+
+  SELF_USES="$(sed -n 's/^[[:space:]]*uses:[[:space:]]*//p' "${SELFTEST}" \
+    | grep -F "${GUARD_REPO}/${GUARD_PATH}@" || true)"
+  SELF_PIN="${SELF_USES##*@}"
+
+  check "the self-test pins the SAME guard revision as the release (got '${SELF_PIN}')" \
+    '[ -n "${SELF_PIN}" ] && [ "${SELF_PIN}" = "${PIN}" ]'
+
+  # The commands are the whole substance of guard 2. Compared as a set
+  # of non-blank, non-comment lines, so indentation cannot make two
+  # identical flows look different.
+  self_commands() {
+    awk '
+      /^[[:space:]]*consumer-commands:[[:space:]]*\|/ { in_cmds = 1; next }
+      in_cmds && /^[[:space:]]{0,8}[a-zA-Z_-]+:/ { in_cmds = 0 }
+      in_cmds { print }
+    ' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -vE '^(#.*)?$'
+  }
+
+  check "the self-test runs the same consumer flow as the release" \
+    '[ "$(self_commands "${SELFTEST}")" = "$(self_commands "${WORKFLOW}")" ]'
+
+  # The guard digests are written in THREE places: the audit record, and
+  # both workflows. Three copies of one security constant is how they
+  # drift, and a drifted copy still reports success, so they are tied
+  # together here rather than trusted to stay equal.
+  yaml_digests() {
+    awk '
+      /^[[:space:]]*guard-digests:[[:space:]]*\|/ { in_d = 1; next }
+      in_d && /^[[:space:]]{0,6}[a-zA-Z_-]+:/ { in_d = 0 }
+      in_d { print }
+    ' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+      | grep -E '^[0-9a-f]{64}' | sed 's/[[:space:]]\{1,\}/  /' | sort
+  }
+
+  audited_digests() {
+    grep -E '^[0-9a-f]{64}' "${REPO_ROOT}/.github/guard-pins.sha256" \
+      | sed 's/[[:space:]]\{1,\}/  /' | sort
+  }
+
+  check "the release passes guard digests at all" \
+    '[ -n "$(yaml_digests "${WORKFLOW}")" ]'
+
+  check "the self-test verifies the same guard digests as the release" \
+    '[ "$(yaml_digests "${SELFTEST}")" = "$(yaml_digests "${WORKFLOW}")" ]'
+
+  # The run-time check and the pre-flight audit must describe one set of
+  # bytes. If they diverge, one of them is verifying a revision nobody
+  # audited, and which one is anybody's guess.
+  check "the digests the release passes are the ones it audited" \
+    '[ "$(yaml_digests "${WORKFLOW}")" = "$(audited_digests)" ]'
+
+  # A rehearsal that can publish is not a rehearsal. It must hold no
+  # write scope at all, and above all no id-token, which is the token
+  # that signs attestations.
+  check "the self-test grants no write permission anywhere" \
+    '! grep -qE "^[[:space:]]*[a-z-]+:[[:space:]]*write[[:space:]]*$" "${SELFTEST}"'
+
+  check "the self-test never takes id-token" \
+    '! grep -qE "^[[:space:]]*id-token:" "${SELFTEST}"'
+
+  # It must not be reachable from a tag push, or it becomes a second
+  # release path with none of the release path's checks.
+  check "the self-test is dispatch-only" \
+    'grep -qE "^[[:space:]]*workflow_dispatch:" "${SELFTEST}" && ! grep -qE "^[[:space:]]*(push|release):" "${SELFTEST}"'
+fi
+
+# --- does the pin actually exist (network) ------------------------------
+
+if ! command -v gh >/dev/null 2>&1; then
+  skip "the pinned commit exists and carries ${GUARD_PATH} (gh not installed)"
+elif ! gh auth status >/dev/null 2>&1; then
+  skip "the pinned commit exists and carries ${GUARD_PATH} (gh not authenticated)"
+elif ! printf "%s" "${PIN}" | grep -qE "^[0-9a-f]{40}$"; then
+  skip "the pinned commit exists and carries ${GUARD_PATH} (no valid SHA to look up)"
+else
+  # Two separate facts. A commit can exist without containing the file,
+  # which would be a pin that resolves and guards nothing.
+  if gh api "repos/${GUARD_REPO}/commits/${PIN}" --jq .sha >/dev/null 2>&1; then
+    ok "the pinned commit ${PIN} exists in ${GUARD_REPO}"
+  else
+    no "the pinned commit ${PIN} does not exist in ${GUARD_REPO}"
+  fi
+
+  if gh api "repos/${GUARD_REPO}/contents/${GUARD_PATH}?ref=${PIN}" --jq .sha >/dev/null 2>&1; then
+    ok "${GUARD_PATH} exists at the pinned commit"
+  else
+    no "${GUARD_PATH} is absent at the pinned commit; the pin guards nothing"
+  fi
+fi
+
+printf '\n%s passed, %s failed, %s skipped\n' "${PASS}" "${FAIL}" "${SKIP}"
+[ "${FAIL}" = "0" ]
