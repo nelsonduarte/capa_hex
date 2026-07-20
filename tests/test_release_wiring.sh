@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Regression test for how .github/workflows/release.yml CALLS the shared
-# release guards.
+# release guards, and for whether what it calls them with covers this
+# package.
 #
 # WHY THIS EXISTS. The guards themselves are tested where they live, in
 # the compiler repository. What is NOT tested there, and cannot be, is
@@ -22,7 +23,11 @@
 #   * dropping `needs: guards`, so the two jobs race and the release can
 #     publish before the guards finish;
 #   * `continue-on-error` or a job-level `if: always()`, so the guards
-#     run, fail, and block nothing.
+#     run, fail, and block nothing;
+#   * naming a module in the flow that does not exist, so the step is a
+#     no-op that nothing notices;
+#   * leaving a module out of the flow entirely, so it is never checked
+#     and the log looks complete.
 #
 # Run it directly:
 #
@@ -36,6 +41,46 @@
 # SKIP rather than failing when `gh` is unavailable or unauthenticated,
 # because an offline machine cannot answer that question and a test that
 # guesses is the failure mode this whole file is about.
+#
+# ------------------------------------------------------------------
+# WHAT `--check-capabilities` ACTUALLY COVERS, because the answer is not
+# what this repository used to claim and the claim is what made the
+# mistake likely.
+#
+# It covers the IMPORT CLOSURE OF THE ENTRY POINT IT IS GIVEN. It does
+# not cover "the package". A module that is not an entry point and is
+# not imported, directly or transitively, by an entry point is never
+# opened, and the command exits 0 having never seen it. Measured on the
+# released 1.18.1 against the published capa_hex v0.2.0 tarball with an
+# `Fs`-taking `extra.capa` added at the top level:
+#
+#   capa --check-capabilities hex.capa      -> exit 0, "OK"
+#   capa --check-capabilities example.capa  -> exit 0, "OK"
+#   capa --check-capabilities extra.capa    -> exit 1, introduces 'Fs'
+#
+# So the ceiling is only as wide as the set of entry points the release
+# hands it, and a package whose release checks two of its five top-level
+# modules has a ceiling over two of its five top-level modules.
+#
+# THIS FILE CLOSES THAT LOOP AGAINST THE FILESYSTEM. It reads the
+# top-level `*.capa` files off disk and requires the config below to
+# account for every one of them: checked, checked-as-a-negative, or
+# explicitly declared unchecked WITH A REASON. Adding a module to the
+# repository and forgetting the flow is then a red test rather than a
+# silent hole.
+#
+# WHY TOTAL COVERAGE RATHER THAN CLOSURE ANALYSIS. The alternative was
+# to parse the `import` lines and prove each module lies inside some
+# entry point's closure. That was rejected: it re-implements the
+# compiler's module resolver in shell, and when the two drift, the shell
+# version reports "covered" for a module that is not, which is the
+# UNSAFE direction and precisely the class of defect this file exists to
+# abolish. Requiring every module to be an entry point costs one line
+# per module in the consumer flow and a few seconds of clean-room time,
+# and it is strictly stronger: it proves each module stays under the
+# ceiling IN ISOLATION, so a later refactor that drops a module out of
+# the closure does not silently drop its check with it.
+# ------------------------------------------------------------------
 #
 # ------------------------------------------------------------------
 # THIS FILE IS MEANT TO BE SHARED ACROSS REPOSITORIES.
@@ -54,6 +99,32 @@
 # config block and nothing else. If you find yourself editing below the
 # line, that is a signal the config block is missing a dimension, and
 # the fix is to add one rather than to fork the body.
+#
+# ADOPTION CHECKLIST. In order, and none of the steps are optional:
+#
+#   1. Copy this file and .github/workflows/{release,guard-selftest}.yml
+#      and .github/guard-pins.sha256 from the template repository.
+#   2. Edit ONLY the CONFIG block below. Run
+#      `bash tests/test_release_wiring.sh` and fix what it reddens; the
+#      body will tell you about every top-level module you have not
+#      accounted for.
+#   3. Make the consumer flow in BOTH workflows match the config. They
+#      are compared to each other, so edit them together.
+#   4. Set `capa = ">=..."` in capa.toml to at least the fleet floor
+#      asserted below. Do NOT re-measure it per repository: the floor is
+#      analytically derivable and the body enforces it.
+#   5. DISPATCH guard-selftest.yml AGAINST THE PREVIOUS TAG BEFORE YOU
+#      TAG ANYTHING. This is the step people skip and it is the one that
+#      pays. Everything in this file is a STATIC check of the wiring; it
+#      cannot run a compiler, so it cannot tell you that the declared
+#      floor is false, that a vendored dependency is missing from the
+#      manifest, or that a documented command does not work in a
+#      directory with no siblings. Only the clean room can, and the
+#      self-test is the clean room without the cost of a tag. A green
+#      run of this file on a repository still declaring a false floor is
+#      exactly what an adoption looks like the moment before it burns a
+#      tag.
+#   6. Only then push the signed tag.
 # ------------------------------------------------------------------
 
 set -uo pipefail
@@ -66,6 +137,12 @@ set -uo pipefail
 ENTRY_POINTS=(hex.capa example.capa)
 
 # Entry points whose CAPABILITY CEILING the clean room must check.
+#
+# Because the ceiling covers only the import closure of the entry it is
+# given (see the note above), this list must account for EVERY top-level
+# `.capa` file in the repository, together with the three lists that
+# follow it. The body reads the directory and refuses any module that
+# appears in none of them.
 #
 # Leave this EMPTY for a package that declares no `[capabilities]` table
 # in capa.toml, and the body below will then require that the flow does
@@ -81,6 +158,29 @@ ENTRY_POINTS=(hex.capa example.capa)
 # evidence. The body cross-checks this list against capa.toml so the two
 # cannot disagree.
 CEILING_ENTRIES=(hex.capa example.capa)
+
+# Modules the clean room must prove the CEILING REFUSES.
+#
+# A repository that documents "this file is what the ceiling catches"
+# is making a claim about the compiler, and an undemonstrated claim
+# about a security control is the thing this whole pilot keeps finding.
+# Each entry here obliges the consumer flow to carry a line that runs
+# the check and requires it to fail FOR THE STATED REASON, so a module
+# that starts passing (or that stops existing) reddens the release.
+NEGATIVE_CEILING_ENTRIES=()
+
+# Modules the clean room must prove the COMPILER REFUSES, as
+# `file.capa=substring of the expected error`. The substring is
+# mandatory: a bare "it failed" passes for a missing file, a syntax
+# error, or any other reason, and a negative that passes for the wrong
+# reason is not a negative.
+COMPILER_REJECTS=()
+
+# Top-level modules deliberately left out of the release checks, as
+# `file.capa=why`. The reason is mandatory and is the whole point: this
+# is the one place a module can be uncovered, and it costs a written
+# justification that a reviewer reads.
+UNCHECKED_MODULES=()
 
 # Does the consumer flow need `python tools/nest_vendor.py`?
 #
@@ -102,6 +202,40 @@ MANIFEST="${REPO_ROOT}/capa.toml"
 GUARD_REPO="nelsonduarte/capa-language"
 GUARD_PATH=".github/workflows/release-guards.yml"
 
+# THE FLEET COMPILER FLOOR. Deliberately below the config line, because
+# it is NOT a per-repository measurement and an adopter must not be able
+# to lower it by editing a config block.
+#
+# It is analytically derivable rather than measured per package. capa
+# 1.18.0 (PR #85) changed the module resolver so `[package].name` maps
+# to the project root. Every seed library self-imports
+# `capa_<name>.<module>` while its tarball extracts to
+# `capa_<name>-v<tag>`, so on every release below 1.18.0 that
+# self-import resolves to nothing and the package does not build at all.
+# 1.18.1 is then the first release whose binary can run `capa test`,
+# which every consumer flow does. That gives >=1.18.1 uniformly, and it
+# was confirmed 3 for 3 against the released binaries on capa_base64,
+# capa_url and capa_uuid.
+#
+# WHY THIS ASSERTION EARNS ITS PLACE. An adoption performed exactly as
+# the checklist above instructs produced 52 green assertions on a
+# repository still declaring `capa = ">=1.1.0"`, a floor that is not
+# merely untested but FALSE: that compiler cannot build the package at
+# all. Nothing static caught it, and the clean room only speaks at tag
+# time, so the defect the pilot existed to find survived a by-the-book
+# adoption and would have cost a tag to discover.
+#
+# Over-declaring is a usability cost and under-declaring is a soundness
+# one, so this is a floor and not an equality: a package may declare
+# HIGHER (capa_authgate needs Serve, which shipped in 1.17.0) and never
+# lower.
+FLEET_FLOOR_MIN="1.18.1"
+
+# The capability names capa accepts in `[capabilities].max`, verbatim
+# from the compiler's own rejection message on 1.18.1. `Unsafe` is
+# deliberately absent: the compiler does not accept it in a ceiling.
+KNOWN_CAPABILITIES="Clock Db Env Fs Net Proc Random Serve Stdio"
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -119,6 +253,10 @@ if [ ! -f "${WORKFLOW}" ]; then
   echo "FAIL: ${WORKFLOW} not found" >&2
   exit 1
 fi
+
+# `file.capa=reason` splitting, for the two lists that carry a reason.
+pair_key()    { printf '%s' "${1%%=*}"; }
+pair_reason() { case "$1" in *=*) printf '%s' "${1#*=}" ;; *) printf '' ;; esac; }
 
 # Extract one job's block: from `  <name>:` at two-space indent up to the
 # next line at that same indent level. Job-level keys sit at four spaces
@@ -177,6 +315,53 @@ check "the release job has no job-level if: that could bypass the guards" \
 check "the guards job has no job-level if: that could skip it" \
   '! printf "%s" "${GUARDS}" | grep -qE "^    if:"'
 
+# --- the declared compiler floor ---------------------------------------
+#
+# tools/capa_floor.sh in the release guards reads this key to decide
+# which RELEASED compiler the clean room downloads, so it is not
+# documentation: it selects the binary the artefact is proven against. A
+# floor naming a compiler that cannot build the package makes the whole
+# clean room a statement about the wrong toolchain.
+
+package_block() {
+  awk '
+    /^[[:space:]]*\[package\][[:space:]]*$/ { in_p = 1; next }
+    in_p && /^[[:space:]]*\[/ { in_p = 0 }
+    in_p { print }
+  ' "${MANIFEST}"
+}
+
+if [ ! -f "${MANIFEST}" ]; then
+  no "capa.toml exists"
+  FLOOR_RAW=""
+else
+  ok "capa.toml exists"
+  FLOOR_RAW="$(package_block | sed -n 's/^[[:space:]]*capa[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+fi
+
+check "capa.toml [package] declares a compiler floor (got '${FLOOR_RAW}')" \
+  '[ -n "${FLOOR_RAW}" ]'
+
+# The guard parses this key, so the form is load-bearing too: anything
+# other than a plain `>=X.Y.Z` is refused rather than interpreted.
+check "the floor is written as >=X.Y.Z" \
+  'printf "%s" "${FLOOR_RAW}" | grep -qE "^>=[0-9]+\.[0-9]+\.[0-9]+$"'
+
+FLOOR_VER="${FLOOR_RAW#>=}"
+
+# `sort -V` is GNU and BSD-portable enough for the runners and dev
+# machines this runs on, but a shell that cannot do version ordering
+# must say so rather than guess an answer.
+if ! printf '1.2.3\n1.2.4\n' | sort -V >/dev/null 2>&1; then
+  skip "the declared floor is at least the fleet floor ${FLEET_FLOOR_MIN} (sort -V unavailable)"
+elif ! printf "%s" "${FLOOR_VER}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  no "the declared floor is at least the fleet floor ${FLEET_FLOOR_MIN} (unparseable floor '${FLOOR_RAW}')"
+elif [ "$(printf '%s\n%s\n' "${FLOOR_VER}" "${FLEET_FLOOR_MIN}" | sort -V | head -1)" = "${FLEET_FLOOR_MIN}" ]; then
+  ok "the declared floor ${FLOOR_RAW} is at least the fleet floor ${FLEET_FLOOR_MIN}"
+else
+  no "the declared floor ${FLOOR_RAW} is BELOW the fleet floor ${FLEET_FLOOR_MIN}; every package self-imports capa_<name>.<module> and no release below 1.18.0 can resolve that in an extracted tarball"
+fi
+
 # --- the guards are given enough to prove something --------------------
 
 # An empty consumer-commands makes the clean room report success having
@@ -189,13 +374,20 @@ COMMANDS="$(printf '%s\n' "${GUARDS}" | awk '
   in_cmds { print }
 ' | grep -vE '^[[:space:]]*(#.*)?$')"
 
+# Compared as whole trimmed lines from here on. The previous form
+# interpolated a filename into a `grep -qE` pattern, where `.` matches
+# any character, so a flow saying `hexXcapa` satisfied a config saying
+# `hex.capa`. Fixed-string, whole-line matching has no such reading.
+COMMANDS_TRIMMED="$(printf '%s\n' "${COMMANDS}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
+flow_has() { printf '%s\n' "${COMMANDS_TRIMMED}" | grep -qxF "$1"; }
+
 check "the clean room is given consumer commands" '[ -n "${COMMANDS}" ]'
 
 check "the consumer flow imports the publisher key first" \
   '[ "$(printf "%s\n" "${COMMANDS}" | head -1 | tr -d "[:space:]")" = "gpg--importpublisher.asc" ]'
 
-check "the consumer flow installs dependencies" \
-  'printf "%s" "${COMMANDS}" | grep -qF "capa install"'
+check "the consumer flow installs dependencies" 'flow_has "capa install"'
 
 # The nested-vendor step, required or forbidden according to the config.
 # Both directions are asserted: a package that needs it and lost it has
@@ -204,18 +396,107 @@ check "the consumer flow installs dependencies" \
 # because it ships no tools/ directory.
 if [ "${NEEDS_NEST_VENDOR}" = "yes" ]; then
   check "the consumer flow builds the nested vendor layout" \
-    'printf "%s" "${COMMANDS}" | grep -qF "tools/nest_vendor.py"'
+    'flow_has "python tools/nest_vendor.py"'
 else
   check "the consumer flow does NOT carry a nest_vendor step it has no tools/ for" \
     '! printf "%s" "${COMMANDS}" | grep -qF "nest_vendor"'
 fi
 
-# Every configured entry point must be compiled.
+# --- every configured module names a file that is really there ---------
+#
+# A module named in both the config and the flow but absent from disk is
+# a step that cannot do anything, and an identical typo in both places
+# is the easiest mistake in the whole adoption to make. Only the
+# filesystem can settle it.
+
+for entry in ${ENTRY_POINTS[@]+"${ENTRY_POINTS[@]}"}; do
+  check "the configured entry point ${entry} exists on disk" \
+    '[ -f "${REPO_ROOT}/${entry}" ]'
+done
+
+for entry in ${CEILING_ENTRIES[@]+"${CEILING_ENTRIES[@]}"}; do
+  check "the configured ceiling entry ${entry} exists on disk" \
+    '[ -f "${REPO_ROOT}/${entry}" ]'
+done
+
+for entry in ${NEGATIVE_CEILING_ENTRIES[@]+"${NEGATIVE_CEILING_ENTRIES[@]}"}; do
+  check "the configured ceiling negative ${entry} exists on disk" \
+    '[ -f "${REPO_ROOT}/${entry}" ]'
+done
+
+for pair in ${COMPILER_REJECTS[@]+"${COMPILER_REJECTS[@]}"}; do
+  key="$(pair_key "${pair}")"
+  check "the configured compiler-rejects module ${key} exists on disk" \
+    '[ -f "${REPO_ROOT}/${key}" ]'
+  check "the compiler-rejects entry ${key} states the error it expects" \
+    '[ -n "$(pair_reason "${pair}")" ]'
+done
+
+for pair in ${UNCHECKED_MODULES[@]+"${UNCHECKED_MODULES[@]}"}; do
+  key="$(pair_key "${pair}")"
+  check "the deliberately unchecked module ${key} exists on disk" \
+    '[ -f "${REPO_ROOT}/${key}" ]'
+  check "the unchecked module ${key} states a reason" \
+    '[ -n "$(pair_reason "${pair}")" ]'
+done
+
+# --- every module on disk is accounted for ------------------------------
+#
+# The ceiling covers the import closure of the entry it is handed, so
+# coverage is exactly the set of entries the flow names, and a module
+# nobody named is a module nobody checked. This is the assertion that
+# turns that from an invisible property of the import graph into a
+# property of a directory listing.
+
+top_level_modules() {
+  local f
+  for f in "${REPO_ROOT}"/*.capa; do
+    [ -e "${f}" ] || continue
+    printf '%s\n' "${f##*/}"
+  done | sort
+}
+
+accounted_modules() {
+  local e pair
+  for e in ${CEILING_ENTRIES[@]+"${CEILING_ENTRIES[@]}"}; do printf '%s\n' "${e}"; done
+  for e in ${NEGATIVE_CEILING_ENTRIES[@]+"${NEGATIVE_CEILING_ENTRIES[@]}"}; do printf '%s\n' "${e}"; done
+  for pair in ${COMPILER_REJECTS[@]+"${COMPILER_REJECTS[@]}"}; do pair_key "${pair}"; printf '\n'; done
+  for pair in ${UNCHECKED_MODULES[@]+"${UNCHECKED_MODULES[@]}"}; do pair_key "${pair}"; printf '\n'; done
+}
+
+ON_DISK="$(top_level_modules)"
+ACCOUNTED="$(accounted_modules | sort)"
+
+UNACCOUNTED="$(comm -23 <(printf '%s\n' "${ON_DISK}") <(printf '%s\n' "${ACCOUNTED}" | uniq) | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+check "every top-level .capa is accounted for by the config${UNACCOUNTED:+ (unaccounted: ${UNACCOUNTED})}" \
+  '[ -z "${UNACCOUNTED}" ]'
+
+# A module listed twice says two things about itself, and one of them is
+# that it is both checked and deliberately not checked.
+DUPLICATED="$(printf '%s\n' "${ACCOUNTED}" | uniq -d | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+check "no module is claimed by two config lists${DUPLICATED:+ (duplicated: ${DUPLICATED})}" \
+  '[ -z "${DUPLICATED}" ]'
+
+# A ceiling entry the clean room never compiles is a ceiling entry whose
+# compile failure would surface as a confusing ceiling failure.
+MISSING_COMPILE=""
+for entry in ${CEILING_ENTRIES[@]+"${CEILING_ENTRIES[@]}"}; do
+  found=no
+  for e in ${ENTRY_POINTS[@]+"${ENTRY_POINTS[@]}"}; do
+    [ "${e}" = "${entry}" ] && found=yes
+  done
+  [ "${found}" = "yes" ] || MISSING_COMPILE="${MISSING_COMPILE}${entry} "
+done
+MISSING_COMPILE="${MISSING_COMPILE% }"
+check "every ceiling entry is also compiled${MISSING_COMPILE:+ (not compiled: ${MISSING_COMPILE})}" \
+  '[ -z "${MISSING_COMPILE}" ]'
+
+# --- the flow runs what the config says ---------------------------------
+
 check "at least one entry point is configured" '[ "${#ENTRY_POINTS[@]}" -gt 0 ]'
 
-for entry in "${ENTRY_POINTS[@]}"; do
-  check "the consumer flow compiles ${entry}" \
-    "printf '%s' \"\${COMMANDS}\" | grep -qE '^[[:space:]]*capa --check ${entry}\$'"
+for entry in ${ENTRY_POINTS[@]+"${ENTRY_POINTS[@]}"}; do
+  check "the consumer flow compiles ${entry}" 'flow_has "capa --check ${entry}"'
 done
 
 # The ceiling, in whichever direction this package declares.
@@ -236,7 +517,7 @@ if [ "${#CEILING_ENTRIES[@]}" -gt 0 ]; then
     '[ "${DECLARES_CEILING}" = "yes" ]'
   for entry in "${CEILING_ENTRIES[@]}"; do
     check "the consumer flow checks the capability ceiling of ${entry}" \
-      "printf '%s' \"\${COMMANDS}\" | grep -qF 'capa --check-capabilities ${entry}'"
+      'flow_has "capa --check-capabilities ${entry}"'
   done
 else
   check "capa.toml declares no ceiling, matching an empty CEILING_ENTRIES" \
@@ -247,8 +528,82 @@ else
     '! printf "%s" "${COMMANDS}" | grep -qF -- "--check-capabilities"'
 fi
 
-check "the consumer flow runs the tests" \
-  'printf "%s" "${COMMANDS}" | grep -qE "^[[:space:]]*capa test[[:space:]]*$"'
+# The negatives. Each is asserted in the flow in a form that requires
+# the command to fail FOR THE STATED REASON: `grep -q` over the combined
+# output makes a pass impossible unless the expected message appeared,
+# so a renamed file, a syntax error, or a ceiling that quietly starts
+# accepting the module all redden.
+for entry in ${NEGATIVE_CEILING_ENTRIES[@]+"${NEGATIVE_CEILING_ENTRIES[@]}"}; do
+  check "the consumer flow proves the ceiling REFUSES ${entry}" \
+    'flow_has "capa --check-capabilities ${entry} 2>&1 | grep -q '"'"'ceiling violation'"'"'"'
+done
+
+for pair in ${COMPILER_REJECTS[@]+"${COMPILER_REJECTS[@]}"}; do
+  key="$(pair_key "${pair}")"
+  msg="$(pair_reason "${pair}")"
+  check "the consumer flow proves the compiler REFUSES ${key}" \
+    'flow_has "capa --check ${key} 2>&1 | grep -q \"${msg}\""'
+done
+
+check "the consumer flow runs the tests" 'flow_has "capa test"'
+
+# --- a ceiling that bounds something ------------------------------------
+#
+# `max` is only worth checking if it excludes something. A ceiling
+# naming every capability the language has passes every entry point in
+# every package and proves precisely nothing, while producing the same
+# reassuring "OK - every declared capability ceiling holds" as a tight
+# one.
+#
+# The spelling check is here for a second reason. capa refuses an
+# unknown name in `max`, but on 1.18.1 it refuses it by DISCARDING THE
+# WHOLE MANIFEST with a warning and then, depending on the subcommand,
+# either exiting 0, dying with a Python traceback, or reporting an
+# unrelated unresolved-import error. A lowercase `stdio` is the likeliest
+# typo in this exercise and this is the cheapest place to catch it.
+
+if [ "${DECLARES_CEILING}" = "yes" ]; then
+  ceiling_names() {
+    awk '
+      /^[[:space:]]*\[capabilities\][[:space:]]*$/ { in_c = 1; next }
+      in_c && /^[[:space:]]*\[/ { in_c = 0 }
+      in_c { print }
+    ' "${MANIFEST}" \
+      | sed -n 's/^[[:space:]]*max[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' \
+      | tr ',' '\n' \
+      | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//' \
+      | grep -v '^[[:space:]]*$'
+  }
+
+  CEILING_MAX="$(ceiling_names)"
+
+  # An unparseable `max` (a multi-line array, a missing key) must not be
+  # read as an empty one, which would silently pass every check below.
+  check "capa.toml's [capabilities].max parses as a single-line array" \
+    'printf "%s\n" "$(awk "/^[[:space:]]*\[capabilities\][[:space:]]*\$/ { in_c = 1; next } in_c && /^[[:space:]]*\[/ { in_c = 0 } in_c { print }" "${MANIFEST}")" | grep -qE "^[[:space:]]*max[[:space:]]*=[[:space:]]*\[.*\][[:space:]]*$"'
+
+  UNKNOWN=""
+  while IFS= read -r name; do
+    [ -n "${name}" ] || continue
+    case " ${KNOWN_CAPABILITIES} " in
+      *" ${name} "*) ;;
+      *) UNKNOWN="${UNKNOWN}'${name}' " ;;
+    esac
+  done <<EOF
+${CEILING_MAX}
+EOF
+  UNKNOWN="${UNKNOWN% }"
+  check "every name in [capabilities].max is a capability capa knows${UNKNOWN:+ (unknown: ${UNKNOWN})}" \
+    '[ -z "${UNKNOWN}" ]'
+
+  EXCLUDED=""
+  for cap in ${KNOWN_CAPABILITIES}; do
+    printf '%s\n' "${CEILING_MAX}" | grep -qxF "${cap}" || EXCLUDED="${EXCLUDED}${cap} "
+  done
+  EXCLUDED="${EXCLUDED% }"
+  check "the ceiling excludes at least one capability, so it bounds something${EXCLUDED:+ (excluded: ${EXCLUDED})}" \
+    '[ -n "${EXCLUDED}" ]'
+fi
 
 # --- the guards hold no credential they could publish with -------------
 

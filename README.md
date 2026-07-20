@@ -6,8 +6,7 @@ uppercase. Zero capabilities: every function is a `(List<Int>) -> String`,
 bytes and text. Nothing here can touch the filesystem, the network, the
 clock, randomness, or anything else; the library holds no authority and
 reads no global state. `capa --manifest` proves it (see
-[Audit claim](#audit-claim)). Output is byte-identical on the Python and
-Wasm backends.
+[Audit claim](#audit-claim)).
 
 Encoding is the textbook byte-to-two-nibbles transform; decoding is
 **strict**, verified against Python's `binascii.hexlify` /
@@ -70,8 +69,17 @@ decode.
 
 ```bash
 capa --run example.capa
-capa --wasm --run example.capa   # byte-identical output
 ```
+
+> **The Wasm backend needs a source checkout, not a release binary.**
+> `capa --wasm` and `capa test --both` both require the `wasmtime`
+> Python package, and the published compiler binaries do not bundle it:
+> on the released 1.18.1, `capa --wasm --run example.capa` exits 1 with
+> `ModuleNotFoundError: No module named 'wasmtime'` and `capa test
+> --both` exits 2 asking for the toolchain. Wasm parity is therefore
+> checked in development and is **not** gated by this repository's
+> release, which runs `capa test` on the Python backend only. See
+> [Verification](#verification).
 
 ## Install via capa.toml
 
@@ -183,13 +191,25 @@ capa test          # Python backend
 capa test --both   # Python + Wasm, byte-identical stdout required
 ```
 
-Current output of `capa test --both`:
+Current output of `capa test --both`, from a source checkout of the
+compiler:
 
 ```
 capa test: 1 file(s) under .../capa_hex/tests [backend: python+wasm]
 test_hex.capa ... ok
 1 test(s): 1 passed, 0 failed
 ```
+
+**What the release gates, and what it does not.** The clean-room guard
+runs `capa test` (Python backend). It does **not** run `capa test
+--both`, and that is a limitation rather than a preference: the clean
+room downloads a *released* compiler binary, and those binaries carry
+no `wasmtime`, so `--both` exits 2 there without running a single test.
+Gating a claim on a command that cannot execute would be a green step
+that inspected nothing, which is the exact defect class the guards
+exist to abolish. So the byte-identical-output claim is asserted on a
+development checkout and is **not** machine-checked at release time.
+Treat it accordingly: it is the least-verified claim in this README.
 
 `capa_test` is declared under `[dev-dependencies]` with the same
 git + tag + verify_key shape as any published dependency, pinned to its
@@ -241,12 +261,34 @@ capa: --check-capabilities: FAILED - 1 ceiling violation(s):
   - package 'capa_hex' declares max=['Stdio'] but its own code introduces 'Fs'
 ```
 
-The bound is `["Stdio"]` rather than `[]` because the ceiling covers
-the whole package and `example.capa` legitimately prints. So it
+The bound is `["Stdio"]` rather than `[]` because it bounds every entry
+the release checks and `example.capa` legitimately prints. So it
 catches the library acquiring any of `Fs`, `Net`, `Env`, `Db`, `Proc`,
-`Random`, `Clock`, `Serve` or `Unsafe`, and does **not** catch
-`hex.capa` acquiring `Stdio`; `capa --manifest hex.capa` above remains
-the tighter statement.
+`Random`, `Clock` or `Serve`, and does **not** catch `hex.capa`
+acquiring `Stdio`; `capa --manifest hex.capa` above remains the tighter
+statement.
+
+> **What the ceiling covers is the import closure of the entry point
+> you check, not "the package".** `capa --check-capabilities <entry>`
+> opens the entry and everything it imports, directly or transitively,
+> and nothing else. The operative consequence: **a module that is not
+> an entry point, and is not imported by one, is unchecked.** Dropping
+> an `Fs`-taking `extra.capa` into the published v0.2.0 tarball and
+> running the released 1.18.1 shows it plainly:
+>
+> ```
+> capa --check-capabilities hex.capa      -> exit 0, OK
+> capa --check-capabilities example.capa  -> exit 0, OK
+> capa --check-capabilities extra.capa    -> exit 1, introduces 'Fs'
+> ```
+>
+> This package has exactly two top-level modules and the release checks
+> both, so nothing here is uncovered. That is a fact about the release
+> flow, not something declaring a `[capabilities]` table gives you.
+> `tests/test_release_wiring.sh` is what keeps it true: it lists the
+> top-level `*.capa` files on disk and fails if the flow does not name
+> every one of them, so a new module cannot arrive uncovered and
+> unnoticed.
 
 ## Verifying a downloaded release
 

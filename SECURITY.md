@@ -104,7 +104,27 @@ actually passes on.
 The bytes of the pinned guards are recorded in
 `.github/guard-pins.sha256`; `tests/test_guard_pins.sh` re-fetches them
 and refuses any difference, and `tests/test_release_wiring.sh` checks
-that the workflow calls them in a way that actually gates the release.
+that the workflow calls them in a way that actually gates the release,
+and that the flow it hands them names **every** top-level module (see
+[the ceiling note](README.md#audit-claim): the ceiling covers only the
+import closure of the entry point it is given, so a module the flow
+does not name is a module nothing checked).
+
+`tests/test_wiring_mutations.sh` is the evidence that any of the above
+bites. It applies thirteen edits to a scratch copy of this repository,
+each of which leaves a release checking less than it claims, and
+requires the wiring test to fail on every one. Three of the thirteen
+came from an adversarial audit that applied them by hand and watched
+the wiring test stay green; a fourth is the false compiler floor that
+survived a by-the-book adoption of this template onto a sibling
+package. A guard nobody has seen fail is a guard nobody has evidence
+about.
+
+**What the release does not gate.** `capa test --both`, which is what
+backs the byte-identical-output claim, is absent from the consumer flow
+because the clean room runs a *released* compiler binary and those
+binaries carry no `wasmtime`: `--both` exits 2 there without running a
+single test. Wasm parity is checked in development only.
 
 ## Security posture
 
