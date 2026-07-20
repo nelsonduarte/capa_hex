@@ -60,19 +60,44 @@ capa = ">=1.18.1"
 #   package 'capa_hex' declares max=['Stdio'] but its own code
 #   introduces 'Fs'
 #
+# WHAT THE CEILING ACTUALLY COVERS, and it is NOT the package. This
+# comment used to say it was, and that was false in the direction that
+# matters.
+#
+# `capa --check-capabilities <entry>` covers the IMPORT CLOSURE OF THE
+# ENTRY IT IS GIVEN. A module that is not the entry, and is not
+# imported (directly or transitively) by it, is never opened. Measured
+# on the released 1.18.1 against the published v0.2.0 tarball with an
+# `Fs`-taking `extra.capa` dropped in at the top level:
+#
+#   capa --check-capabilities hex.capa      -> exit 0, "OK"
+#   capa --check-capabilities example.capa  -> exit 0, "OK"
+#   capa --check-capabilities extra.capa    -> exit 1, introduces 'Fs'
+#
+# THE OPERATIVE CONSEQUENCE: a module that is not an entry point and is
+# not imported by one is UNCHECKED. The ceiling is exactly as wide as
+# the set of entries the release hands it, and no wider. This package
+# has two top-level modules and the release checks both, so nothing is
+# uncovered here; that is a fact about the release flow, not a property
+# of declaring a `[capabilities]` table.
+# tests/test_release_wiring.sh is what keeps it true: it reads the
+# top-level `*.capa` files off disk and fails if the flow does not name
+# every one of them.
+#
 # WHY "Stdio" AND NOT THE EMPTY LIST, stated because the empty list is
-# what the README's audit claim asserts. The ceiling is a property of
-# the PACKAGE, evaluated over everything reachable from whichever
-# entry point is checked, and example.capa legitimately holds Stdio to
-# print. `max = []` therefore passes hex.capa and FAILS example.capa,
-# which would ship a tarball in which a documented command errors.
+# what the README's audit claim asserts. `max` bounds every entry the
+# release checks, and example.capa legitimately holds Stdio to print.
+# `max = []` therefore passes hex.capa and FAILS example.capa, which
+# would ship a tarball in which a documented command errors.
 #
 # What this bound does and does not buy, exactly: it catches the
-# library acquiring any of Fs, Net, Env, Db, Proc, Random, Clock,
-# Serve or Unsafe. It does NOT catch hex.capa acquiring Stdio, because
-# the example already introduces it. `capa --manifest hex.capa`, which
-# the README's audit claim uses, remains the tighter statement: it
-# reports the empty set per function.
+# library acquiring any of Fs, Net, Env, Db, Proc, Random, Clock or
+# Serve. (`Unsafe` is not a name capa accepts here; the compiler's own
+# allowed list is Clock, Db, Env, Fs, Net, Proc, Random, Serve, Stdio.)
+# It does NOT catch hex.capa acquiring Stdio, because the example
+# already introduces it. `capa --manifest hex.capa`, which the README's
+# audit claim uses, remains the tighter statement: it reports the empty
+# set per function.
 [capabilities]
 max = ["Stdio"]
 
