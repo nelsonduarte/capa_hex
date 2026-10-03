@@ -4,7 +4,7 @@ Pure-Capa hexadecimal (base16): encode and decode, lowercase and
 uppercase. Zero capabilities: every function is a `(List<Int>) -> String`,
 `(String) -> String`, or `(String) -> Result<List<Int>, HexError>` over
 bytes and text. The library's functions declare no capability, and the compiler
-refuses any capability call in them; it reads no global state.
+refuses a call in them on a built-in capability that is not in scope; it reads no global state.
 `capa --manifest` records it (see [Audit claim](#audit-claim)).
 
 Encoding is the textbook byte-to-two-nibbles transform; decoding is
