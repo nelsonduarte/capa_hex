@@ -3,10 +3,9 @@
 Pure-Capa hexadecimal (base16): encode and decode, lowercase and
 uppercase. Zero capabilities: every function is a `(List<Int>) -> String`,
 `(String) -> String`, or `(String) -> Result<List<Int>, HexError>` over
-bytes and text. Nothing here can touch the filesystem, the network, the
-clock, randomness, or anything else; the library holds no authority and
-reads no global state. `capa --manifest` proves it (see
-[Audit claim](#audit-claim)).
+bytes and text. The library's functions declare no capability, and the compiler
+refuses any capability call in them; it reads no global state.
+`capa --manifest` records it (see [Audit claim](#audit-claim)).
 
 Encoding is the textbook byte-to-two-nibbles transform; decoding is
 **strict**, verified against Python's `binascii.hexlify` /
@@ -222,8 +221,8 @@ fetches the test library.
 ## Audit claim
 
 Hex sits on the boundary between untrusted text and bytes, exactly where
-a supply-chain attacker would want a foothold, so this library proves
-the empty claim about itself. `capa --manifest` over the module reports,
+a supply-chain attacker would want a foothold, so this library shows
+its empty capability surface. `capa --manifest` over the module reports,
 for every function in `hex`:
 
 ```
